@@ -82,6 +82,7 @@ export function provider(
     api: OpenAI,
     body: Parameters<Transport>[0],
     signal: AbortSignal,
+    onText?: (delta: string) => void,
   ) {
     const events = await api.responses.create(
       { ...body, store: false, stream: true },
@@ -89,6 +90,7 @@ export function provider(
     );
     const items: OpenAI.Responses.ResponseOutputItem[] = [];
     for await (const event of events) {
+      if (event.type === "response.output_text.delta") onText?.(event.delta);
       if (event.type === "response.output_item.done")
         items[event.output_index] = event.item;
       if (event.type === "response.completed")
@@ -113,6 +115,7 @@ export function provider(
   async function subscription(
     body: Parameters<Transport>[0],
     signal: AbortSignal,
+    onText?: (delta: string) => void,
   ) {
     try {
       let token = await chatgptAccessToken(c.CHATGPT_CREDENTIALS_PATH, signal);
@@ -124,7 +127,7 @@ export function provider(
           timeout: 180000,
         });
         try {
-          return await stream(subscribed, body, signal);
+          return await stream(subscribed, body, signal, onText);
         } catch (error) {
           if (
             error instanceof APIError &&
@@ -162,13 +165,13 @@ export function provider(
       throw error;
     }
   }
-  const transport: Transport = async (body, signal) => {
+  const transport: Transport = async (body, signal, onText) => {
     await authorize();
     try {
       return await observeProvider(body.model, "agent", "AgentTurnV1", () =>
         c.AI_PROVIDER === "chatgpt"
-          ? subscription(body, signal)
-          : stream(client, body, signal),
+          ? subscription(body, signal, onText)
+          : stream(client, body, signal, onText),
       );
     } catch (e) {
       if (e instanceof ProviderError) throw e;

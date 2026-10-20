@@ -29,7 +29,11 @@ must never break.
    checks below, the whole turn commits atomically inside the job's lease.
 5. `GET /api/v1/messages/:id` reports `queued`, `working`, `retrying`,
    `blocked` (no consent or provider), `failed` (with `POST …/retry`) or
-   `done` with the reply and what changed.
+   `done` with the reply and what changed. While `working` it carries
+   `progress`: what the agent is doing ("Checking the calendar") and, for a
+   question, the reply as the model streams it. The client polls quickly while a
+   turn works and shows the draft; the committed turn replaces it, so nothing
+   unchecked is ever kept.
 
 Text captures (`/captures/text`) and recordings (after transcription) use the
 same turn, marked as notes.
@@ -101,6 +105,14 @@ justifies the schedule; erasing it clears the dates.
 
 Questions about time use the `calendar` tool, so "what's due this week" is
 answered from the full range, overdue work first.
+
+**Repeating commitments** ("the cost report every month-end", "hver mandag")
+are one task with a rule (every day, week, month or year, with an interval)
+dated at its next occurrence. Completing it, by the agent, by hand or from the
+morning brief, moves the dates on to the following occurrence and keeps the task
+open; the series counts from its first date, so a month-end stays at the month's
+end. Moving the dates moves one occurrence; cancelling ends the series. The
+calendar tool also lists later occurrences in the range.
 
 ## Invariants enforced in code
 

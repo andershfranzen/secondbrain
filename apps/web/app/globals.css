@@ -491,6 +491,18 @@ kbd {
   background: currentColor;
   animation: breathe 1.6s ease-in-out infinite;
 }
+/* An answer still being written: a quiet breathing dot where it ends. */
+.assistant-message[data-draft="true"] > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  vertical-align: middle;
+  animation: breathe 1.6s ease-in-out infinite;
+}
 .citation-chips {
   display: flex;
   flex-wrap: wrap;

@@ -18,6 +18,7 @@ import {
   operationId,
   type Evidence,
 } from "@secondbrain/shared";
+import { rollRepeat } from "./calendar.js";
 
 export async function sourcesFor(db: Queryable, ids: string[]) {
   return (
@@ -541,6 +542,8 @@ export async function patchItem(
         `UPDATE tasks SET status=$1,completed_at=CASE WHEN $1='completed' THEN now() ELSE NULL END WHERE item_id=$2`,
         [patch.status, id],
       );
+    // A repeating task moves on to its next occurrence instead of closing.
+    if (patch.status === "completed") await rollRepeat(db, id);
     if (patch.dueDate !== undefined || patch.dueAt !== undefined) {
       if (patch.dueDate && patch.dueAt)
         fail(422, "DEADLINE_CONFLICT", "Choose a date or a specific time.");

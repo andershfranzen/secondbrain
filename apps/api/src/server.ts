@@ -41,6 +41,7 @@ import {
   openPrivate,
   initStorage,
   undoTurn,
+  verifyDoneLink,
 } from "@secondbrain/memory";
 import { auth } from "./auth.js";
 function page(query: any) {
@@ -688,7 +689,7 @@ export async function buildServer(
     if (!m) fail(404, "NOT_FOUND", "Message not found.");
     const job = await one(
       db,
-      "SELECT id,status,blocked_reason,error_code FROM processing_jobs WHERE dedupe_key=$1",
+      "SELECT id,status,blocked_reason,error_code,progress FROM processing_jobs WHERE dedupe_key=$1",
       [`converse:${m.id}`],
     );
     const turn = job
@@ -723,6 +724,8 @@ export async function buildServer(
       status,
       blockedReason: job?.blocked_reason ?? null,
       errorCode: job?.error_code ?? null,
+      // While the agent works: what it is doing, and a question's answer as it is written.
+      progress: job?.status === "running" ? (job.progress ?? null) : null,
       turn: turn
         ? {
             id: turn.id,
@@ -737,6 +740,28 @@ export async function buildServer(
     });
   });
   app.post("/api/v1/turns/:id/undo", async (req) => undoTurn(db, id(req)));
+  app.post("/api/v1/brief/done/:id", async (req) => {
+    const revision = verifyDoneLink(c, id(req), req.query as any);
+    if (revision === null)
+      fail(403, "LINK_INVALID", "This link is invalid or has expired.");
+    return db.transaction(async (tx) => {
+      const task = await getItem(tx, id(req));
+      if (task.kind !== "task" || task.revision !== revision)
+        fail(409, "ALREADY_CHANGED", "This task changed since the brief.");
+      const source = await manualSource(
+        tx,
+        `Marked done from the morning brief: ${task.title}`,
+      );
+      const done = await patchItem(
+        tx,
+        task.id,
+        revision!,
+        { status: "completed" },
+        source.id,
+      );
+      return { title: done.title, status: done.status };
+    });
+  });
   app.post("/api/v1/messages/:id/retry", async (req, reply) => {
     await db.transaction(async (tx) => {
       const job = await one(

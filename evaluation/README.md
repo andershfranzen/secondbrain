@@ -23,7 +23,9 @@ date behind it ("når releasen er ude"). Its checks include the dates each task
 lands on, and its questions ask what is due this week, what is overdue, what
 was promised to whom and what is due in November.
 
-A third scenario checks that a question never becomes a fact.
+`gentagelser` covers repeating commitments ("ved hver månedsafslutning",
+"Every Monday"): one task per series that moves on to its next occurrence when
+one is done. A last scenario checks that a question never becomes a fact.
 
 ## What is scored
 
@@ -69,6 +71,22 @@ on any missed commitment, missing answer item, wrongly listed item or failed tur
 Reports are written with owner-only permissions and never overwrite an existing
 file; use a new name for each run. They contain the synthetic text, replies and
 scores, never credentials. The results folder is ignored by Git.
+
+## Your corrections as cases
+
+`pnpm ops corrections --cases <file>` drafts private cases from turns you undid
+and items you edited (see [operations](../docs/operations.md#corrections)). Pass
+the file with `--cases`; because they are your own notes, a live run also needs
+`--send-cases-to-provider`. A check with status `absent` passes when no task
+matches, for something that should not have become one.
+
+## As a deploy gate
+
+With `--baseline <file>`, the run is compared with the last accepted report on
+the checks both scored: it passes if no fewer pass and no turn failed (the
+first gated run needs every commitment found), and a passing run becomes the new
+baseline. `scripts/deploy.sh` does this before starting a version whose agent
+changed.
 
 ## Before relying on it
 

@@ -161,6 +161,9 @@ export type ConverseInput = {
       start: string | null;
       due: string | null;
       dueHint: string | null;
+      /** A repeating task: "every month", and the day it was last done. */
+      repeats?: string;
+      lastDone?: string | null;
       overdue: boolean;
       quotes: { sourceId: string; quote: string }[];
     }[];

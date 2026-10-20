@@ -28,7 +28,14 @@ import {
   composeBrief,
   scheduleBrief,
   sendBrief,
+  doneLink,
+  corrections,
+  partialField,
 } from "@secondbrain/memory";
+import {
+  correctionCases,
+  scoreLedger,
+} from "../scripts/lib/agent-evaluation.js";
 
 const url =
   process.env.TEST_DATABASE_URL ??
@@ -39,11 +46,17 @@ let db: Database,
   dir: string;
 const ai = new FakeProvider();
 let cookies: Record<string, string> = {};
-async function request(method: string, path: string, body?: unknown) {
+async function request(
+  method: string,
+  path: string,
+  body?: unknown,
+  headers: Record<string, string> = {},
+) {
   const r = await app.inject({
     method: method as any,
     url: "/api/v1" + path,
     headers: {
+      ...headers,
       origin: "http://localhost:3000",
       cookie: Object.entries(cookies)
         .map(([k, v]) => `${k}=${v}`)
@@ -439,6 +452,7 @@ describe("tool boundary and final-answer checks", () => {
     dueTime: null,
     dueHint: null,
     status: null,
+    repeat: null,
     projectId: null,
     aliases: null,
     reason: "Commitment",
@@ -487,6 +501,8 @@ describe("tool boundary and final-answer checks", () => {
         dueHint: null,
         clearDue: null,
         clearStart: null,
+        repeat: null,
+        clearRepeat: null,
         projectId: null,
         aliases: null,
         archive: null,
@@ -705,16 +721,21 @@ describe("calendar", () => {
             ...schedule,
             dueHint: null,
             status: null,
+            repeat: null,
             projectId: null,
             aliases: null,
             reason: "Commitment",
             ...when,
           }),
         );
-      await task("Update vendor reconciliation", "before the run on 30 October", {
-        dueDate: "2026-10-29",
-        dueHint: "before the run on 30 October",
-      });
+      await task(
+        "Update vendor reconciliation",
+        "before the run on 30 October",
+        {
+          dueDate: "2026-10-29",
+          dueHint: "before the run on 30 October",
+        },
+      );
       await task("Set up staging env", "staging env next week", {
         startDate: "2026-10-26",
         dueDate: "2026-11-01",
@@ -937,6 +958,13 @@ describe("calendar", () => {
         "• Set up staging env (starts Mon 26 Oct)",
       ].join("\n"),
       priority: 3,
+      done: [
+        {
+          id: expect.any(String),
+          title: "Meet Jonas",
+          revision: expect.any(Number),
+        },
+      ],
     });
     // The coming six days: the reconciliation deadline on the 29th appears from the 23rd.
     expect(
@@ -1006,9 +1034,55 @@ describe("calendar", () => {
           priority: 3,
           click: c.APP_ORIGIN,
           message: expect.stringContaining("Meet Jonas at 10:00"),
+          actions: [
+            {
+              action: "http",
+              label: "Done: Meet Jonas",
+              url: expect.stringMatching(
+                /^http:\/\/localhost:3000\/api\/v1\/brief\/done\/[0-9a-f-]{36}\?r=\d+&e=\d+&s=[\w-]+$/,
+              ),
+              method: "POST",
+              clear: true,
+            },
+          ],
         }),
       },
     ]);
+  });
+
+  it("completes a task from the brief's signed link, once", async () => {
+    await plotted();
+    const meet = (await one(
+      db,
+      "SELECT id,revision FROM knowledge_items WHERE title='Meet Jonas'",
+    )) as { id: string; revision: number };
+    const link = new URL(doneLink(c, meet));
+    const tap = (url: URL) =>
+      app.inject({ method: "POST", url: url.pathname + url.search });
+    // The notification app sends no session, cookie or origin.
+    const done = await tap(link);
+    expect(done.statusCode).toBe(200);
+    expect(done.json()).toEqual({ title: "Meet Jonas", status: "completed" });
+    expect(
+      await one(db, "SELECT status FROM tasks WHERE item_id=$1", [meet.id]),
+    ).toEqual({ status: "completed" });
+    expect((await tap(link)).statusCode).toBe(409);
+    const forged = new URL(link);
+    forged.searchParams.set("r", String(meet.revision + 1));
+    expect((await tap(forged)).statusCode).toBe(403);
+    const expired = new URL(
+      doneLink(c, meet, new Date(Date.now() - 37 * 3600 * 1000)),
+    );
+    expect((await tap(expired)).statusCode).toBe(403);
+    // Other routes still need a session.
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/turns/" + meet.id + "/undo",
+        })
+      ).statusCode,
+    ).toBe(403);
   });
 
   it("moves, times and clears a task's dates", async () => {
@@ -1037,6 +1111,8 @@ describe("calendar", () => {
           dueHint: null,
           clearDue: null,
           clearStart: null,
+          repeat: null,
+          clearRepeat: null,
           projectId: null,
           aliases: null,
           archive: null,
@@ -1202,5 +1278,415 @@ describe("worker wake-up", () => {
       await client.query("UNLISTEN *");
       client.release();
     }
+  });
+});
+
+/** A scripted agent turn: drives the real tools, then answers. */
+class Scripted extends FakeProvider {
+  constructor(
+    private script: (
+      run: (name: string, args: object) => Promise<any>,
+      input: any,
+      request: AgentRequest<any>,
+    ) => Promise<Partial<AgentOutput> | void>,
+  ) {
+    super();
+  }
+  override async runAgent<T>(
+    request: AgentRequest<T>,
+  ): Promise<AgentResult<T>> {
+    const run = (name: string, args: object) => {
+      const t = request.tools.find((x) => x.name === name)!;
+      return t.run(t.parameters.parse(args));
+    };
+    const extra = await this.script(run, request.input, request as any);
+    const value = {
+      messageKind: "note",
+      reply: "Saved.",
+      claims: [],
+      accounted: [],
+      insufficientEvidence: false,
+      openListScope: null,
+      ...extra,
+    } as T;
+    expect(await request.check!(value)).toBeNull();
+    return { value, steps: [], model: "scripted" };
+  }
+}
+const noSchedule = {
+  startDate: null,
+  startTime: null,
+  dueDate: null,
+  dueTime: null,
+};
+const createTask = (sourceId: string, quote: string, extra: object) => ({
+  kind: "task",
+  title: "Send the cost report",
+  content: "Send the monthly cost report.",
+  certainty: "confirmed",
+  evidence: [{ sourceId, quote }],
+  category: null,
+  entityType: null,
+  requestedBy: null,
+  agreedOn: null,
+  ...noSchedule,
+  dueHint: null,
+  status: null,
+  repeat: null,
+  projectId: null,
+  aliases: null,
+  reason: "Commitment",
+  ...extra,
+});
+const updateTask = (
+  id: string,
+  sourceId: string,
+  quote: string,
+  extra: object,
+) => ({
+  id,
+  title: null,
+  content: null,
+  status: null,
+  certainty: null,
+  requestedBy: null,
+  ...noSchedule,
+  dueHint: null,
+  clearDue: null,
+  clearStart: null,
+  repeat: null,
+  clearRepeat: null,
+  projectId: null,
+  aliases: null,
+  archive: null,
+  evidence: [{ sourceId, quote }],
+  reason: "Update",
+  ...extra,
+});
+async function note(text: string, now: string, adapter: FakeProvider) {
+  const m = await postMessage(db, { clientMessageId: randomUUID(), text });
+  await db.query(
+    `UPDATE processing_jobs SET payload=payload||jsonb_build_object('now',$2::text) WHERE id=$1`,
+    [m.job!.id, now],
+  );
+  await drain(adapter);
+  expect(
+    await one(db, "SELECT status,error_code FROM processing_jobs WHERE id=$1", [
+      m.job!.id,
+    ]),
+  ).toEqual({ status: "succeeded", error_code: null });
+  return m;
+}
+
+describe("repeating commitments", () => {
+  async function monthly(title = "Send the cost report") {
+    await note(
+      "I send the cost report every month-end.",
+      "2026-10-20T10:00:00Z",
+      new Scripted(async (run, input) => {
+        const sourceId = input.message.sources[0].sourceId;
+        await expect(
+          run(
+            "create_item",
+            createTask(sourceId, "every month-end", {
+              title,
+              repeat: { every: "month", interval: 1 },
+            }),
+          ),
+        ).rejects.toThrow(/needs the date of its next occurrence/);
+        await run(
+          "create_item",
+          createTask(sourceId, "every month-end", {
+            title,
+            dueDate: "2026-10-31",
+            dueHint: "every month-end",
+            repeat: { every: "month", interval: 1 },
+          }),
+        );
+      }),
+    );
+    return (await one(db, "SELECT id FROM knowledge_items WHERE title=$1", [
+      title,
+    ]))!.id as string;
+  }
+  const state = (id: string) =>
+    one(
+      db,
+      "SELECT status,due_date,completed_at,last_done_at IS NOT NULL AS done_before,repeat_every,repeat_interval,repeat_anchor FROM tasks WHERE item_id=$1",
+      [id],
+    );
+
+  it("moves on to the next occurrence when one is done, and shows later ones on the calendar", async () => {
+    const id = await monthly();
+    expect(await state(id)).toEqual({
+      status: "open",
+      due_date: "2026-10-31",
+      completed_at: null,
+      done_before: false,
+      repeat_every: "month",
+      repeat_interval: 1,
+      repeat_anchor: "2026-10-31",
+    });
+    const m = await note(
+      "Sent the October cost report.",
+      "2026-10-30T10:00:00Z",
+      new Scripted(async (run, input) => {
+        const sourceId = input.message.sources[0].sourceId;
+        expect(input.open.items[0]).toMatchObject({
+          title: "Send the cost report",
+          repeats: "every month",
+          lastDone: null,
+        });
+        await run(
+          "update_item",
+          updateTask(id, sourceId, "Sent the October cost report", {
+            status: "completed",
+          }),
+        );
+      }),
+    );
+    expect(await state(id)).toMatchObject({
+      status: "open",
+      due_date: "2026-11-30",
+      completed_at: null,
+      done_before: true,
+    });
+    const actions = (await one(
+      db,
+      "SELECT t.actions FROM agent_turns t JOIN processing_jobs j ON j.id=t.job_id WHERE j.id=$1",
+      [m.job!.id],
+    ))!.actions;
+    expect(actions).toEqual([
+      expect.objectContaining({ type: "completed", detail: "next 2026-11-30" }),
+    ]);
+    // Ticking it off by hand moves it on as well, keeping the month's end.
+    const item = (await request("GET", `/items/${id}`)).body;
+    const patched = await request(
+      "PATCH",
+      `/items/${id}`,
+      { status: "completed" },
+      { "if-match": `"${item.revision}"` },
+    );
+    expect(patched.status).toBe(200);
+    expect(await state(id)).toMatchObject({
+      status: "open",
+      due_date: "2026-12-31",
+    });
+    // Later occurrences sit on the calendar too.
+    const ask = await postMessage(db, {
+      clientMessageId: randomUUID(),
+      text: "What is due through February?",
+    });
+    const job = (await one(db, "SELECT * FROM processing_jobs WHERE id=$1", [
+      ask.job!.id,
+    ]))!;
+    const t = turnTools(db, ai, job, [ask.source!.id], {
+      clock: { timeZone: "Europe/Copenhagen", today: "2026-11-02" },
+    });
+    const cal = t.tools.find((x) => x.name === "calendar")!;
+    const r: any = await cal.run(
+      cal.parameters.parse({
+        from: "2026-12-01",
+        to: "2027-02-28",
+        forAnswer: true,
+      }),
+    );
+    expect(
+      r.days.map((d: any) => [d.date, d.entries.map((e: any) => e.event)]),
+    ).toEqual([
+      ["2026-12-31", ["due"]],
+      ["2027-01-31", ["repeats"]],
+      ["2027-02-28", ["repeats"]],
+    ]);
+  });
+
+  it("ends the series when cancelled, or turns it into a one-off", async () => {
+    const id = await monthly();
+    await note(
+      "Finance takes over the cost report, so I no longer send it.",
+      "2026-10-21T10:00:00Z",
+      new Scripted(async (run, input) => {
+        const sourceId = input.message.sources[0].sourceId;
+        await run(
+          "update_item",
+          updateTask(id, sourceId, "I no longer send it", {
+            status: "cancelled",
+          }),
+        );
+      }),
+    );
+    expect(await state(id)).toMatchObject({
+      status: "cancelled",
+      due_date: "2026-10-31",
+    });
+    const other = await monthly("Send the yearly cost report");
+    await note(
+      "The cost report is a one-off this year after all.",
+      "2026-10-21T11:00:00Z",
+      new Scripted(async (run, input) => {
+        const sourceId = input.message.sources[0].sourceId;
+        await run(
+          "update_item",
+          updateTask(other, sourceId, "a one-off this year", {
+            clearRepeat: true,
+          }),
+        );
+      }),
+    );
+    expect(await state(other)).toMatchObject({
+      repeat_every: null,
+      repeat_anchor: null,
+    });
+  });
+});
+
+describe("streaming progress", () => {
+  it("shows what the turn is doing, then a question's answer as it is written", async () => {
+    await login();
+    const asked = await say("What do I have outstanding?");
+    const pause = () => new Promise((r) => setTimeout(r, 400));
+    const seen: any[] = [];
+    await drain(
+      new Scripted(async (_run, _input, request) => {
+        request.onProgress!({ type: "tool", tool: "calendar" });
+        await pause();
+        seen.push((await turn(asked.messageId)) as any);
+        request.onProgress!({
+          type: "text",
+          text: '{"messageKind":"question","reply":"Nothing open \\"yet',
+        });
+        await pause();
+        seen.push((await turn(asked.messageId)) as any);
+        return {
+          messageKind: "question",
+          reply: 'Nothing open "yet".',
+          insufficientEvidence: true,
+        };
+      }),
+    );
+    expect(seen.map((s) => [s.status, s.progress])).toEqual([
+      ["working", { activity: "Checking the calendar", reply: null }],
+      ["working", { activity: "Writing", reply: 'Nothing open "yet' }],
+    ]);
+    const done = await turn(asked.messageId);
+    expect(done).toMatchObject({ status: "done", progress: null });
+    expect(done.turn.reply.text).toBe('Nothing open "yet".');
+  });
+
+  it("reads a field from a partly written JSON answer", () => {
+    const full = JSON.stringify({
+      messageKind: "question",
+      reply: 'Two "open":\n- **one** é \u2713',
+    });
+    expect(partialField(full.slice(0, 20), "reply")).toBeNull();
+    expect(partialField(full.slice(0, full.indexOf("open") + 2), "reply")).toBe(
+      'Two "op',
+    );
+    expect(partialField(full, "reply")).toBe('Two "open":\n- **one** é ✓');
+    expect(partialField(full, "messageKind")).toBe("question");
+    // A half-written escape is left out until it completes.
+    expect(partialField('{"reply":"a\\', "reply")).toBe("a");
+  });
+});
+
+describe("corrections", () => {
+  it("collects undone turns and the user's edits to what the agent recorded, as private cases", async () => {
+    const made = await say("Mette asked me to build the onboarding dashboard.");
+    await drain();
+    const doc = await say("Jonas asked me to review the API design doc.");
+    await drain();
+    const undone = (await turn(made.messageId)).turn;
+    expect((await request("POST", `/turns/${undone.id}/undo`)).status).toBe(
+      200,
+    );
+    // The user fixes who asked and the deadline on the second one.
+    const review = (await one(
+      db,
+      "SELECT id,revision FROM knowledge_items WHERE kind='task'",
+    ))!;
+    expect(
+      (
+        await request(
+          "PATCH",
+          `/items/${review.id}`,
+          { dueDate: "2026-11-06", title: "Review Jonas's API design doc" },
+          { "if-match": `"${review.revision}"` },
+        )
+      ).status,
+    ).toBe(200);
+    // Ticking something off is progress, not a correction.
+    const item = (await request("GET", `/items/${review.id}`)).body;
+    await request(
+      "PATCH",
+      `/items/${review.id}`,
+      { status: "completed" },
+      { "if-match": `"${item.revision}"` },
+    );
+    const list = await corrections(db, new Date(Date.now() - 3600000));
+    expect(list).toEqual([
+      expect.objectContaining({
+        kind: "undo",
+        messageKind: "note",
+        notes: [
+          expect.objectContaining({
+            text: "Mette asked me to build the onboarding dashboard.",
+          }),
+        ],
+        undid: [expect.objectContaining({ type: "created", kind: "task" })],
+      }),
+      expect.objectContaining({
+        kind: "edit",
+        itemKind: "task",
+        changed: ["title", "due"],
+        notes: [
+          expect.objectContaining({
+            text: "Jonas asked me to review the API design doc.",
+          }),
+        ],
+        after: expect.objectContaining({ due: "2026-11-06" }),
+      }),
+    ]);
+    const cases = correctionCases(list);
+    expect(cases.map((x) => x.ledger)).toEqual([
+      [expect.objectContaining({ status: "absent", commitment: false })],
+      [
+        expect.objectContaining({
+          phrases: expect.arrayContaining(["jonas", "review", "design"]),
+          status: "open",
+          due: ["2026-11-06"],
+        }),
+      ],
+    ]);
+    expect(cases[1]!.steps).toEqual([
+      expect.objectContaining({
+        text: "Jonas asked me to review the API design doc.",
+      }),
+    ]);
+  });
+
+  it("scores something that must not become a task", () => {
+    const task = {
+      id: "x",
+      kind: "task",
+      title: "Build the onboarding dashboard",
+      content: "",
+      status: "open",
+      requestedBy: null,
+      certainty: "confirmed",
+      quotes: [],
+      start: null,
+      due: null,
+      dueHint: null,
+    };
+    const check = {
+      phrases: ["onboarding"],
+      status: "absent" as const,
+      commitment: false,
+    };
+    expect(scoreLedger([task], [check])[0]).toMatchObject({
+      pass: false,
+      problems: ["recorded as a task"],
+    });
+    expect(scoreLedger([], [check])[0]!.pass).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
 import { type Database, one } from "@secondbrain/database";
 import type { AIProvider } from "@secondbrain/ai";
 import { type Config, randomUUID } from "@secondbrain/shared";
-import { postMessage, processJob } from "@secondbrain/memory";
+import { postMessage, processJob, type Correction } from "@secondbrain/memory";
 import type {
   LedgerCheck,
   Phrases,
@@ -22,6 +22,8 @@ export type LedgerItem = {
   start: string | null;
   due: string | null;
   dueHint: string | null;
+  /** day, week, month or year for a repeating task. */
+  repeat?: string | null;
 };
 export type ProbeAnswer = {
   question: string;
@@ -57,6 +59,21 @@ export function scoreLedger(items: LedgerItem[], checks: LedgerCheck[]) {
     const stillOpen =
       check.status === "closed" &&
       found.some((i) => ["open", "in_progress"].includes(i.status ?? ""));
+    if (check.status === "absent")
+      return {
+        expect: `${check.phrases[0]} (absent)`,
+        commitment: check.commitment,
+        pass: !found.length,
+        problems: found.length ? ["recorded as a task"] : [],
+        items: found.map((i) => ({
+          title: i.title,
+          status: i.status,
+          requestedBy: i.requestedBy,
+          start: i.start,
+          due: i.due,
+          dueHint: i.dueHint,
+        })),
+      };
     const problems = [
       !found.length && "not recorded as a task",
       found.length &&
@@ -87,6 +104,10 @@ export function scoreLedger(items: LedgerItem[], checks: LedgerCheck[]) {
         wanted.length &&
         !wanted.some((i) => !i.due && !i.start && i.dueHint) &&
         `expected no dates and the timing in dueHint; got ${wanted.map((i) => `${i.start ?? "-"}..${i.due ?? "-"} (${i.dueHint ?? "no hint"})`).join(", ")}`,
+      check.repeats &&
+        wanted.length &&
+        !wanted.some((i) => i.repeat === check.repeats) &&
+        `repeats ${wanted.map((i) => i.repeat ?? "never").join(", ")}, expected every ${check.repeats}`,
       ...wanted
         .map((i) => fillerIn(i, check.filler ?? []))
         .filter((f) => f.length)
@@ -195,7 +216,7 @@ async function ledger(db: Database): Promise<LedgerItem[]> {
         coalesce((SELECT array_agg(i.quote) FROM item_sources i WHERE i.item_id=r.id),'{}') AS quotes,
         coalesce(r.start_date::text,to_char(r.start_at AT TIME ZONE s.timezone,'YYYY-MM-DD HH24:MI')) AS start,
         coalesce(r.due_date::text,to_char(r.due_at AT TIME ZONE s.timezone,'YYYY-MM-DD HH24:MI')) AS due,
-        r.due_hint AS "dueHint"
+        r.due_hint AS "dueHint",r.repeat_every AS repeat
        FROM item_records r, app_settings s WHERE r.projection_state='valid' AND r.lifecycle<>'superseded'`,
     )
   ).rows as LedgerItem[];
@@ -244,6 +265,70 @@ export async function runScenario(
     probes.push(scored);
   }
   return { name: scenario.name, failures, ledger: ledgerChecks, probes };
+}
+const significant = (s: string) =>
+  new Set(s.toLowerCase().match(/[\p{L}\p{N}]{5,}/gu) ?? []);
+/** Words of an item's title that also occur in the notes, to find it again. */
+function phrasesFor(title: string, notes: string) {
+  const inNotes = significant(notes);
+  const words = [...significant(title)];
+  const shared = words.filter((w) => inNotes.has(w));
+  return (shared.length ? shared : words).slice(0, 4);
+}
+/**
+ * Draft evaluation cases from the user's corrections: replay the notes the
+ * agent got wrong and expect what the user corrected it to. They hold the
+ * user's own notes, so they stay private (next to the data, never in Git).
+ * Corrections that depend on earlier state (an undone update) are skipped.
+ */
+export function correctionCases(list: Correction[]): Scenario[] {
+  const cases: Scenario[] = [];
+  for (const c of list) {
+    if (!c.notes.length) continue;
+    const text = c.notes.map((n) => n.text).join("\n");
+    const steps = c.notes.map((n) => ({ at: n.at, text: n.text }));
+    let ledger: LedgerCheck[] = [];
+    if (c.kind === "undo" && c.messageKind !== "question")
+      ledger = c.undid
+        .filter((a) => a.type === "created" && a.kind === "task")
+        .map((a) => ({
+          phrases: phrasesFor(a.title, text),
+          status: "absent",
+          commitment: false,
+        }));
+    if (c.kind === "edit" && c.itemKind === "task") {
+      const a = c.after;
+      ledger = [
+        {
+          phrases: phrasesFor(a.title, text),
+          status:
+            a.lifecycle === "archived"
+              ? "absent"
+              : ["completed", "cancelled"].includes(a.status ?? "")
+                ? "closed"
+                : "open",
+          commitment: true,
+          ...(c.changed.includes("requestedBy") && a.requestedBy
+            ? { requestedBy: a.requestedBy }
+            : {}),
+          ...(c.changed.includes("due") && a.due
+            ? { due: [a.due.slice(0, 10)] }
+            : {}),
+          ...(c.changed.includes("start") && a.start
+            ? { start: [a.start] }
+            : {}),
+        },
+      ];
+    }
+    if (ledger.some((l) => l.phrases.length))
+      cases.push({
+        name: `correction-${c.at.slice(0, 10)}-${(c.kind === "undo" ? c.turnId : c.itemId).slice(0, 8)}`,
+        steps,
+        ledger: ledger.filter((l) => l.phrases.length),
+        probes: [],
+      });
+  }
+  return cases;
 }
 export function summarize(results: Awaited<ReturnType<typeof runScenario>>[]) {
   const checks = results.flatMap((r) => r.ledger),

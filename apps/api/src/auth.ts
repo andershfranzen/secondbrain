@@ -54,6 +54,13 @@ export function auth(db: Database, c: Config) {
       path === "/api/v1/auth/csrf"
     )
       return;
+    // The morning brief's "Done" buttons are signed one-time links, sent by
+    // the phone's notification app without a session; the route verifies them.
+    if (
+      req.method === "POST" &&
+      /^\/api\/v1\/brief\/done\/[0-9a-f-]{36}$/.test(path)
+    )
+      return;
     const mutation = !["GET", "HEAD", "OPTIONS"].includes(req.method);
     if (mutation && req.headers.origin !== c.APP_ORIGIN)
       fail(403, "ORIGIN_DENIED", "Request origin is not allowed.");

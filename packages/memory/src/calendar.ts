@@ -1,4 +1,4 @@
-import type { Queryable, Row } from "@secondbrain/database";
+import { type Queryable, type Row, one } from "@secondbrain/database";
 
 /**
  * The calendar the agent plans against. Days are calendar dates (YYYY-MM-DD)
@@ -63,6 +63,82 @@ const short = (iso: string) =>
     timeZone: "UTC",
   });
 
+export type Repeat = {
+  every: "day" | "week" | "month" | "year";
+  interval: number;
+};
+const lastDay = (year: number, month: number) =>
+  new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+/**
+ * The nth occurrence of a series counted from its anchor day. A month-end
+ * anchor stays at the month's end; day 31 falls back to shorter months' last day.
+ */
+export function occurrence(anchor: string, repeat: Repeat, n: number) {
+  const step = n * repeat.interval;
+  if (repeat.every === "day") return addDays(anchor, step);
+  if (repeat.every === "week") return addDays(anchor, step * 7);
+  const a = day(anchor),
+    months = a.getUTCMonth() + step * (repeat.every === "year" ? 12 : 1),
+    year = a.getUTCFullYear() + Math.floor(months / 12),
+    month = ((months % 12) + 12) % 12,
+    monthEnd = a.getUTCDate() === lastDay(a.getUTCFullYear(), a.getUTCMonth()),
+    date = monthEnd
+      ? lastDay(year, month)
+      : Math.min(a.getUTCDate(), lastDay(year, month));
+  return new Date(Date.UTC(year, month, date)).toISOString().slice(0, 10);
+}
+/** The first occurrence after a day. */
+export function nextOccurrence(anchor: string, repeat: Repeat, after: string) {
+  const days = { day: 1, week: 7, month: 28, year: 365 }[repeat.every];
+  let n = Math.max(
+    0,
+    Math.floor(daysBetween(anchor, after) / (days * repeat.interval)) - 1,
+  );
+  while (occurrence(anchor, repeat, n) <= after) n++;
+  return occurrence(anchor, repeat, n);
+}
+/**
+ * Completing a repeating task moves it on to its next occurrence instead of
+ * closing it: start and deadline shift by the same number of days, keeping
+ * their local times. Returns the new deadline (or start), or null when the
+ * task does not repeat.
+ */
+export async function rollRepeat(tx: Queryable, id: string) {
+  const t = await one(
+    tx,
+    `SELECT t.status,t.repeat_every,t.repeat_interval,t.repeat_anchor,s.timezone,
+       coalesce(t.due_date,(t.due_at AT TIME ZONE s.timezone)::date)::text AS due_day,
+       coalesce(t.start_date,(t.start_at AT TIME ZONE s.timezone)::date)::text AS start_day
+     FROM tasks t, app_settings s WHERE t.item_id=$1`,
+    [id],
+  );
+  if (!t?.repeat_every || t.status !== "completed") return null;
+  const ref: string | null = t.due_day ?? t.start_day;
+  if (!ref) return null;
+  const next = nextOccurrence(
+    t.repeat_anchor,
+    { every: t.repeat_every, interval: t.repeat_interval },
+    ref,
+  );
+  const shift = daysBetween(ref, next);
+  const moved = (column: string) =>
+    `((${column} AT TIME ZONE $3)+make_interval(days=>$2)) AT TIME ZONE $3`;
+  const r = (await one(
+    tx,
+    `UPDATE tasks SET status='open',last_done_at=completed_at,completed_at=NULL,
+       due_date=due_date+$2::int,due_at=${moved("due_at")},
+       start_date=start_date+$2::int,start_at=${moved("start_at")}
+     WHERE item_id=$1 RETURNING due_date,due_at,start_date,start_at`,
+    [id, shift, t.timezone],
+  ))!;
+  return t.due_day
+    ? localStamp(r.due_date, r.due_at, t.timezone)
+    : localStamp(r.start_date, r.start_at, t.timezone);
+}
+/** "every month", "every 2 weeks". */
+export const repeatLabel = (r: Repeat) =>
+  r.interval === 1 ? `every ${r.every}` : `every ${r.interval} ${r.every}s`;
+
 /** The current and coming weeks, for resolving "next week", "uge 44" or "end of the month". */
 export function upcomingWeeks(today: string, count = 8) {
   const monday = weekStart(today);
@@ -100,11 +176,13 @@ export async function agenda(
   limit = 400,
 ) {
   const open = `r.kind='task' AND r.status IN('open','in_progress') AND r.lifecycle='active' AND r.projection_state='valid'`;
+  const columns = (tz: string) =>
+    `r.*,${startDay(tz)}::text AS start_day,${dueDay(tz)}::text AS due_day,
+     (SELECT title FROM knowledge_items p WHERE p.id=r.project_id) AS project_title,
+     (SELECT max(m.created_at) FROM item_sources i JOIN sources s ON s.id=i.source_id JOIN messages m ON m.id=s.message_id WHERE i.item_id=r.id AND s.available) AS last_source_at`;
   const rows = (
     await db.query<AgendaTask>(
-      `SELECT r.*,${startDay("$4")}::text AS start_day,${dueDay("$4")}::text AS due_day,
-        (SELECT title FROM knowledge_items p WHERE p.id=r.project_id) AS project_title,
-        (SELECT max(m.created_at) FROM item_sources i JOIN sources s ON s.id=i.source_id JOIN messages m ON m.id=s.message_id WHERE i.item_id=r.id AND s.available) AS last_source_at
+      `SELECT ${columns("$4")}
        FROM item_records r
        WHERE ${open} AND (
          ${dueDay("$4")} < $3::date
@@ -125,9 +203,43 @@ export async function agenda(
        ORDER BY r.updated_at DESC,r.id LIMIT 30`,
     )
   ).rows;
+  // Repeating tasks show their next occurrence; later ones in the range come from the rule.
+  const repeating = (
+    await db.query(
+      `SELECT r.id,r.title,r.repeat_every,r.repeat_interval,r.repeat_anchor,
+         coalesce(${dueDay("$1")},${startDay("$1")})::text AS ref
+       FROM item_records r WHERE ${open} AND r.repeat_every IS NOT NULL`,
+      [timeZone],
+    )
+  ).rows;
+  const later: { id: string; title: string; date: string }[] = [];
+  for (const r of repeating) {
+    const rule: Repeat = { every: r.repeat_every, interval: r.repeat_interval };
+    for (
+      let date = nextOccurrence(r.repeat_anchor, rule, r.ref), n = 0;
+      date <= to && n < 31;
+      date = nextOccurrence(r.repeat_anchor, rule, date), n++
+    )
+      if (date >= from) later.push({ id: r.id, title: r.title, date });
+  }
+  const tasks = rows.slice(0, limit);
+  const missing = [...new Set(later.map((l) => l.id))].filter(
+    (id) => !tasks.some((t) => t.id === id),
+  );
+  if (missing.length)
+    tasks.push(
+      ...(
+        await db.query<AgendaTask>(
+          `SELECT ${columns("$2")} FROM item_records r WHERE r.id=ANY($1::uuid[]) ORDER BY r.id`,
+          [missing, timeZone],
+        )
+      ).rows,
+    );
   return {
     truncated: rows.length > limit,
-    tasks: rows.slice(0, limit),
+    tasks,
+    /** Later occurrences of repeating tasks within the range. */
+    later: later.sort((a, b) => a.date.localeCompare(b.date)),
     undated: {
       total: undated.length ? Number(undated[0]!.total) : 0,
       items: undated.map((u) => ({

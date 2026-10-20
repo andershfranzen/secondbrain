@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { type Queryable, one, enqueue } from "@secondbrain/database";
 import { type Config } from "@secondbrain/shared";
 import { ProviderError } from "@secondbrain/ai";
@@ -7,7 +8,13 @@ import { agenda, addDays, localDate } from "./calendar.js";
  * The morning brief: one push a day from the calendar, built from the ledger
  * without a model. Quiet days send nothing.
  */
-export type Brief = { title: string; message: string; priority: number };
+export type Brief = {
+  title: string;
+  message: string;
+  priority: number;
+  /** The most urgent tasks, most urgent first, for "Done" buttons. */
+  done: { id: string; title: string; revision: number }[];
+};
 
 const day = (iso: string) =>
   new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-GB", {
@@ -41,22 +48,27 @@ export async function composeBrief(
   const overdue: string[] = [],
     now: string[] = [],
     soon: string[] = [];
+  const urgent: [number, (typeof tasks)[number]][] = [];
   for (const r of tasks) {
     const due = r.due_day,
       starts = r.start_day;
-    if (due && due < today)
+    if (due && due < today) {
       overdue.push(`${r.title} (due ${day(due)}${who(r)})`);
-    else if (due === today)
+      urgent.push([0, r]);
+    } else if (due === today) {
       now.push(
         `${r.title} (due today${r.due_at ? ` ${time(r.due_at, timeZone)}` : ""}${who(r)})`,
       );
-    else if (starts === today)
+      urgent.push([1, r]);
+    } else if (starts === today) {
       now.push(
         `${r.title}${r.start_at ? ` at ${time(r.start_at, timeZone)}` : " (starts today)"}`,
       );
-    else if (due && due <= week)
+      urgent.push([2, r]);
+    } else if (due && due <= week) {
       soon.push(`${r.title} (due ${day(due)}${who(r)})`);
-    else if (starts && starts > today && starts <= week)
+      urgent.push([3, r]);
+    } else if (starts && starts > today && starts <= week)
       soon.push(
         `${r.title} (${r.start_at ? `${day(starts)} ${time(r.start_at, timeZone)}` : `starts ${day(starts)}`})`,
       );
@@ -101,8 +113,59 @@ export async function composeBrief(
     }),
     message,
     priority: overdue.length ? 4 : 3,
+    done: urgent
+      .sort((a, b) => a[0] - b[0])
+      .slice(0, 3)
+      .map(([, r]) => ({ id: r.id, title: r.title, revision: r.revision })),
   };
 }
+
+/**
+ * A "Done" button in the brief is a signed link for one task at one revision:
+ * it works once, since completing the task changes its revision, and expires.
+ */
+const doneSignature = (
+  c: Config,
+  id: string,
+  revision: number,
+  expires: number,
+) =>
+  createHmac("sha256", c.SESSION_SECRET)
+    .update(`brief-done:${id}:${revision}:${expires}`)
+    .digest("base64url");
+export function doneLink(
+  c: Config,
+  task: { id: string; revision: number },
+  now = new Date(),
+) {
+  const expires = Math.floor(now.getTime() / 1000) + 36 * 3600;
+  const query = new URLSearchParams({
+    r: String(task.revision),
+    e: String(expires),
+    s: doneSignature(c, task.id, task.revision, expires),
+  });
+  return `${c.APP_ORIGIN}/api/v1/brief/done/${task.id}?${query}`;
+}
+/** The revision a valid, unexpired link was signed for, or null. */
+export function verifyDoneLink(
+  c: Config,
+  id: string,
+  query: { r?: string; e?: string; s?: string },
+  now = new Date(),
+) {
+  const revision = Number(query.r),
+    expires = Number(query.e);
+  if (!Number.isInteger(revision) || !Number.isInteger(expires) || !query.s)
+    return null;
+  if (expires < now.getTime() / 1000) return null;
+  const expected = Buffer.from(doneSignature(c, id, revision, expires)),
+    given = Buffer.from(query.s);
+  return expected.length === given.length && timingSafeEqual(expected, given)
+    ? revision
+    : null;
+}
+const label = (title: string) =>
+  `Done: ${[...title].length > 24 ? [...title].slice(0, 23).join("").trimEnd() + "…" : title}`;
 
 /** Queues today's brief once the brief time has passed, unless it is long past. */
 export async function scheduleBrief(
@@ -150,6 +213,14 @@ export async function sendBrief(
       message: brief.message,
       priority: brief.priority,
       click: c.APP_ORIGIN,
+      // ntfy shows at most three buttons; each completes one task.
+      actions: brief.done.map((task) => ({
+        action: "http",
+        label: label(task.title),
+        url: doneLink(c, task),
+        method: "POST",
+        clear: true,
+      })),
     }),
     signal,
   }).catch(() => {

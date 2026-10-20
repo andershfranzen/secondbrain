@@ -19,6 +19,7 @@ export async function fakeAgent<T>(
 ): Promise<AgentResult<T>> {
   const steps: AgentStep[] = [];
   const tool = async (name: string, args: Record<string, unknown>) => {
+    request.onProgress?.({ type: "tool", tool: name });
     const result: any = await callTool(
       request.tools.find((t) => t.name === name),
       JSON.stringify(args),
@@ -33,6 +34,7 @@ export async function fakeAgent<T>(
   };
   const input = request.input as ConverseInput;
   const value = (await converse(input, tool)) as T;
+  request.onProgress?.({ type: "text", text: JSON.stringify(value) });
   const problem = request.check ? await request.check(value) : null;
   if (problem) throw failure("AGENT_OUTPUT_REJECTED", true);
   return { value, steps, model: "fake-agent" };
@@ -58,6 +60,7 @@ const createArgs = {
   dueTime: null,
   dueHint: null,
   status: null,
+  repeat: null,
   projectId: null,
   aliases: null,
 };
@@ -124,6 +127,8 @@ async function converse(
             dueHint: null,
             clearDue: null,
             clearStart: null,
+            repeat: null,
+            clearRepeat: null,
             projectId: null,
             aliases: null,
             archive: null,

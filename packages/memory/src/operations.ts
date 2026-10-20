@@ -257,7 +257,7 @@ export async function purgeConversation(db: Queryable, c: Config, id: string) {
         );
       else if (current?.kind === "task")
         await db.query(
-          "UPDATE tasks SET action=$1,due_date=NULL,due_at=NULL,start_date=NULL,start_at=NULL,due_source_id=NULL WHERE item_id=$2",
+          "UPDATE tasks SET action=$1,due_date=NULL,due_at=NULL,start_date=NULL,start_at=NULL,repeat_every=NULL,repeat_interval=NULL,repeat_anchor=NULL,due_source_id=NULL WHERE item_id=$2",
           [quotes, itemId],
         );
       else if (current?.kind === "idea")
@@ -372,7 +372,7 @@ export async function purgeConversation(db: Queryable, c: Config, id: string) {
     [sources],
   );
   await db.query(
-    "UPDATE tasks SET due_date=NULL,due_at=NULL,start_date=NULL,start_at=NULL,due_source_id=NULL WHERE due_source_id=ANY($1::uuid[])",
+    "UPDATE tasks SET due_date=NULL,due_at=NULL,start_date=NULL,start_at=NULL,repeat_every=NULL,repeat_interval=NULL,repeat_anchor=NULL,due_source_id=NULL WHERE due_source_id=ANY($1::uuid[])",
     [sources],
   );
   await db.query("DELETE FROM sources WHERE id=ANY($1::uuid[])", [sources]);

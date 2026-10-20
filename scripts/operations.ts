@@ -14,14 +14,17 @@ import { join, resolve, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { Database, one } from "@secondbrain/database";
 import { config, randomUUID, hash, z } from "@secondbrain/shared";
 import {
+  corrections,
   initStorage,
   privatePath,
   requestDeletion,
   purgeConversation,
 } from "@secondbrain/memory";
+import { correctionCases } from "./lib/agent-evaluation.js";
 export async function command(
   program: string,
   args: string[],
@@ -246,12 +249,61 @@ export async function restore(bundle: string) {
     await db.close();
   }
 }
+/**
+ * Lists where the user corrected the agent (undone turns, their edits to what
+ * it recorded) and, with --cases, writes them as private evaluation cases.
+ */
+export async function reportCorrections(args: string[]) {
+  const { values } = parseArgs({
+    args,
+    options: {
+      days: { type: "string", default: "90" },
+      cases: { type: "string" },
+    },
+  });
+  const c = config(),
+    db = new Database(c.DATABASE_URL);
+  try {
+    const since = new Date(Date.now() - Number(values.days) * 86400000);
+    const list = await corrections(db, since);
+    for (const x of list) {
+      const said = x.notes.map(
+        (n) => `  "${n.text.replace(/\s+/g, " ").slice(0, 160)}"`,
+      );
+      if (x.kind === "undo")
+        console.log(
+          `${x.at.slice(0, 10)} undone (${x.messageKind}): ${x.undid.map((a) => `${a.type} ${a.kind} "${a.title}"`).join("; ") || "no changes"}`,
+        );
+      else
+        console.log(
+          `${x.at.slice(0, 10)} edited ${x.itemKind} "${x.before.title}": ${x.changed.map((k) => `${k} ${JSON.stringify(x.before[k as keyof typeof x.before])} → ${JSON.stringify(x.after[k as keyof typeof x.after])}`).join(", ")}`,
+        );
+      for (const line of said) console.log(line);
+    }
+    console.log(
+      `${list.length} correction${list.length === 1 ? "" : "s"} in the last ${values.days} days.`,
+    );
+    if (values.cases) {
+      const cases = correctionCases(list),
+        path = resolve(values.cases);
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await writeFile(path, JSON.stringify(cases, null, 2) + "\n", {
+        mode: 0o600,
+      });
+      console.log(`Wrote ${cases.length} private evaluation cases to ${path}.`);
+    }
+  } finally {
+    await db.close();
+  }
+}
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.argv[2] === "backup") await backup();
   else if (process.argv[2] === "restore" && process.argv[3])
     await restore(process.argv[3]);
+  else if (process.argv[2] === "corrections")
+    await reportCorrections(process.argv.slice(3));
   else
     throw new Error(
-      "Usage: pnpm ops backup | pnpm ops restore /path/to/restored-bundle",
+      "Usage: pnpm ops backup | pnpm ops restore /path/to/restored-bundle | pnpm ops corrections [--days 90] [--cases file.json]",
     );
 }

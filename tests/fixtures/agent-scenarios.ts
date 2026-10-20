@@ -15,7 +15,8 @@ export type Probe = {
 };
 export type LedgerCheck = {
   phrases: Phrases;
-  status: "open" | "closed";
+  /** "absent": no task may match, for something that is not a commitment. */
+  status: "open" | "closed" | "absent";
   requestedBy?: string;
   certainty?: "confirmed" | "unconfirmed";
   /** A commitment the agent must not miss; failing it is the critical metric. */
@@ -28,6 +29,8 @@ export type LedgerCheck = {
   start?: string[];
   /** Timing with no date behind it: no dates, the user's words in dueHint. */
   undated?: true;
+  /** A repeating commitment: day, week, month or year. */
+  repeats?: string;
 };
 export type Scenario = {
   name: string;
@@ -215,7 +218,11 @@ export const scenarios: Scenario[] = [
     ],
     ledger: [
       {
-        phrases: ["leverandørafstemning", "vendor reconciliation", "afstemning"],
+        phrases: [
+          "leverandørafstemning",
+          "vendor reconciliation",
+          "afstemning",
+        ],
         status: "open",
         requestedBy: "Birgit",
         commitment: true,
@@ -279,7 +286,9 @@ export const scenarios: Scenario[] = [
       {
         at: "2026-10-15T09:00:00+02:00",
         question: "Hvad har jeg lovet Birgit?",
-        mustInclude: [["leverandørafstemning", "vendor reconciliation", "afstemning"]],
+        mustInclude: [
+          ["leverandørafstemning", "vendor reconciliation", "afstemning"],
+        ],
         mustExclude: [["moms"], ["budgetmodel"]],
       },
       {
@@ -290,6 +299,52 @@ export const scenarios: Scenario[] = [
           ["leverandørafstemning", "vendor reconciliation", "afstemning"],
         ],
         mustExclude: [["budgetmodel"], ["parkering"]],
+      },
+    ],
+  },
+  {
+    // Repeating commitments: one task per series, moved on when an occurrence is done.
+    name: "gentagelser",
+    steps: [
+      {
+        at: "2026-10-02T09:00:00+02:00",
+        text: "Fra nu af skal jeg sende cost-rapporten til Anna ved hver månedsafslutning.",
+      },
+      {
+        at: "2026-10-05T08:30:00+02:00",
+        text: "Every Monday I have to send the weekly status mail to Kristian.",
+      },
+      {
+        at: "2026-10-05T16:00:00+02:00",
+        text: "Sent this week's status mail to Kristian.",
+      },
+      {
+        at: "2026-10-30T15:00:00+01:00",
+        text: "Har sendt oktober-rapporten til Anna.",
+      },
+    ],
+    ledger: [
+      {
+        phrases: ["cost-rapport", "cost rapport", "cost report"],
+        status: "open",
+        commitment: true,
+        due: ["2026-11-30"],
+        repeats: "month",
+      },
+      {
+        phrases: ["status mail", "statusmail", "status email"],
+        status: "open",
+        commitment: true,
+        due: ["2026-10-12", "2026-10-19"],
+        repeats: "week",
+      },
+    ],
+    probes: [
+      {
+        at: "2026-11-02T09:00:00+01:00",
+        question: "What's due in November?",
+        mustInclude: [["cost-rapport", "cost rapport", "cost report"]],
+        mustExclude: [],
       },
     ],
   },

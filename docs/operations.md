@@ -92,6 +92,33 @@ It is built from the ledger without a model and is skipped on quiet days, and a
 worker that was down at brief time does not send it more than three hours late.
 Subscribe to the topic in the ntfy app on your phone.
 
+The three most urgent tasks get a **Done** button. Each is a signed link for
+that task at its current revision (keyed by `SESSION_SECRET`, valid 36 hours),
+so it works once and only for that task; it needs no session, since the
+notification app sends none. The phone must reach `APP_ORIGIN`. A completion
+from the brief is recorded as a manual change, and a repeating task moves on to
+its next occurrence.
+
+## Corrections
+
+`pnpm ops corrections [--days 90]` lists where you corrected the agent: turns
+you undid and your own edits to what it recorded (ticking tasks off doesn't
+count). With `--cases file.json` it drafts them as evaluation cases: replay the
+notes, expect what you corrected. They contain your notes, so keep them with
+your data, never in Git.
+
+## Deploying from Git
+
+The deployment directory can be a clone of the repository. `scripts/deploy.sh`
+fetches `origin/main`, builds it and restarts the stack. When the agent changed
+(its prompt, tools, calendar, provider code or the scenarios), it first refreshes
+the correction cases and runs the live evaluation inside the new worker image,
+storing reports in the data volume under `evaluation/`. The new version starts
+only if, on the checks both runs scored, no fewer pass than in the last accepted
+run (one rerun is allowed for model variance); otherwise the old version keeps
+running. `--eval` forces an evaluation, `--skip-eval` skips it. `.env.deploy`
+can set `COMPOSE_FILES` and `EVAL_DATABASE_URL`.
+
 ## Restore
 
 Restore into an **empty, isolated PostgreSQL database and fresh application data
@@ -133,9 +160,8 @@ isolated restore when necessary.
 
 This implementation covers Phase 1: capture, transcription, extraction, sourced
 memory, conservative merging/review, hybrid recall, corrections, exports, and
-operations. Streaming speech conversations, calendar integration, proactive
-notifications and per-provider cost estimates
-are not implemented.
+operations. Streaming speech conversations, external calendar integration and
+per-provider cost estimates are not implemented.
 
 Settings reports pending-job age, expired leases, safe failure codes, semantic
 index coverage, available disk space and recent backup/restore runs. Low space

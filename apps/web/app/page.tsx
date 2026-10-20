@@ -91,7 +91,12 @@ function when(i: Row) {
             ? start
             : `from ${start}`
           : null;
-  return [dates, i.dueHint].filter(Boolean).join(" · ") || null;
+  const repeats =
+    i.repeatEvery &&
+    (i.repeatInterval > 1
+      ? `every ${i.repeatInterval} ${i.repeatEvery}s`
+      : `every ${i.repeatEvery}`);
+  return [dates, repeats, i.dueHint].filter(Boolean).join(" · ") || null;
 }
 const calm = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 /** Crossfades whole-view changes; the composer and header keep their identity.
@@ -816,9 +821,10 @@ function ChatTurn({ turn, open, onChange }: any) {
           if (r.status === "done") onChange?.();
           return;
         }
+        // Quick while the agent works, so its progress and answer stream in.
         timer = setTimeout(
           () => void poll(),
-          r.status === "blocked" ? 15000 : 1200,
+          r.status === "working" ? 400 : r.status === "blocked" ? 15000 : 1200,
         );
       } catch (e: any) {
         if (!live) return;
@@ -843,11 +849,14 @@ function ChatTurn({ turn, open, onChange }: any) {
   }, [status, turn.text, turn.sourceId, matches.length]);
   const kind = state?.turn?.kind;
   const pending = ["queued", "working", "retrying"].includes(status);
+  // A question's answer as the agent writes it; the committed turn replaces it.
+  const draft: string | null = (pending && state?.progress?.reply) || null;
+  const activity: string | undefined = state?.progress?.activity;
   return (
     <article
       ref={article}
       className={
-        done && kind !== "note" && kind !== "instruction"
+        draft || (done && kind !== "note" && kind !== "instruction")
           ? "chat-turn"
           : "chat-turn saved"
       }
@@ -856,9 +865,13 @@ function ChatTurn({ turn, open, onChange }: any) {
       <div className="user-message">
         <p>{turn.text}</p>
       </div>
-      <Reveal open={pending}>
+      <Reveal open={pending && !draft}>
         <p className="message-status" role="status" data-pending="true">
-          {status === "retrying" ? "Saved · retrying" : "Saved · working on it"}
+          {status === "retrying"
+            ? "Saved · retrying"
+            : activity
+              ? `Saved · ${activity.charAt(0).toLowerCase()}${activity.slice(1)}`
+              : "Saved · working on it"}
         </p>
       </Reveal>
       <Reveal open={status === "blocked"}>
@@ -887,7 +900,12 @@ function ChatTurn({ turn, open, onChange }: any) {
           {error}
         </p>
       </Reveal>
-      <Reveal open={!!done}>
+      <Reveal open={!!done || !!draft}>
+        {draft && !done && (
+          <div className="assistant-message" data-draft="true" aria-busy="true">
+            <Markdown text={draft} />
+          </div>
+        )}
         {done && (
           <TurnView
             turn={state!.turn}

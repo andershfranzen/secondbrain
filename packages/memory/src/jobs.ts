@@ -96,7 +96,7 @@ export async function claimJob(db: Database, id: string, ai: AIProvider) {
     }
     return one(
       tx,
-      `UPDATE processing_jobs SET status='running',attempts=attempts+1,blocked_reason=NULL,lease_token=$2,lease_until=now()+interval '120 seconds',updated_at=now() WHERE id=$1 RETURNING *`,
+      `UPDATE processing_jobs SET status='running',attempts=attempts+1,blocked_reason=NULL,progress=NULL,lease_token=$2,lease_until=now()+interval '120 seconds',updated_at=now() WHERE id=$1 RETURNING *`,
       [id, randomUUID()],
     );
   });

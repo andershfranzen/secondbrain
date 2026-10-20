@@ -16,6 +16,11 @@ export type AgentStep = {
   ok: boolean;
   summary: string;
 };
+/** What a running agent is doing: a tool it calls, its answer so far, or a retry after a rejected answer. */
+export type AgentProgress =
+  | { type: "tool"; tool: string }
+  | { type: "text"; text: string }
+  | { type: "revise" };
 export type AgentRequest<T> = {
   instructions: string;
   input: unknown;
@@ -25,6 +30,7 @@ export type AgentRequest<T> = {
   check?: (value: T) => Promise<string | null> | string | null;
   maxSteps?: number;
   signal: AbortSignal;
+  onProgress?: (progress: AgentProgress) => void;
 };
 export type AgentResult<T> = { value: T; steps: AgentStep[]; model: string };
 type ResponseBody = {
@@ -38,6 +44,8 @@ type ResponseBody = {
 export type Transport = (
   body: ResponseBody,
   signal: AbortSignal,
+  /** Receives output text as it streams. */
+  onText?: (delta: string) => void,
 ) => Promise<OpenAI.Responses.Response>;
 export type ProviderFailure = (code: string, retryable: boolean) => Error;
 
@@ -120,6 +128,8 @@ export async function runAgentLoop<T>(
   let rejections = 0;
   for (let step = 0; step < (request.maxSteps ?? 30); step++) {
     if (request.signal.aborted) throw failure("PROVIDER_TIMEOUT", true);
+    let streamed = "";
+    const progress = request.onProgress;
     const response = await transport(
       {
         model,
@@ -129,6 +139,11 @@ export async function runAgentLoop<T>(
         ...(tools.length ? { tools, parallel_tool_calls: true } : {}),
       },
       request.signal,
+      progress &&
+        ((delta) => {
+          streamed += delta;
+          progress({ type: "text", text: streamed });
+        }),
     );
     const calls = response.output.filter(
       (item): item is OpenAI.Responses.ResponseFunctionToolCall =>
@@ -136,6 +151,7 @@ export async function runAgentLoop<T>(
     );
     if (calls.length) {
       for (const call of calls) {
+        request.onProgress?.({ type: "tool", tool: call.name });
         input.push({
           type: "function_call",
           call_id: call.call_id,
@@ -172,6 +188,7 @@ export async function runAgentLoop<T>(
     if (!problem && request.check) problem = await request.check(value!);
     if (!problem) return { value: value!, steps, model };
     if (++rejections > 3) throw failure("AGENT_OUTPUT_REJECTED", true);
+    request.onProgress?.({ type: "revise" });
     input.push({ role: "assistant", content: raw || "(no output)" });
     input.push({
       role: "user",
