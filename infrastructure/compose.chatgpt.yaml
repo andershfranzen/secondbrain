@@ -1,0 +1,29 @@
+# Optional subscription-only override; use with compose.production.yaml.
+services:
+  api:
+    environment:
+      AI_PROVIDER: chatgpt
+      CHATGPT_CREDENTIALS_PATH: /chatgpt-auth/connection.json
+    volumes:
+      - chatgpt_auth:/chatgpt-auth
+  worker:
+    environment:
+      AI_PROVIDER: chatgpt
+      CHATGPT_CREDENTIALS_PATH: /chatgpt-auth/connection.json
+    volumes:
+      - chatgpt_auth:/chatgpt-auth
+  chatgpt-connect:
+    image: secondbrain:local
+    profiles: [auth]
+    command: [pnpm, connect:chatgpt]
+    network_mode: host
+    environment:
+      CHATGPT_CREDENTIALS_PATH: /chatgpt-auth/connection.json
+    volumes:
+      - chatgpt_auth:/chatgpt-auth
+    read_only: true
+    tmpfs: ['/tmp:mode=1777,size=64m']
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+volumes:
+  chatgpt_auth:

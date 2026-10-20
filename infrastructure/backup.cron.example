@@ -1,0 +1,3 @@
+# Install in the server user's crontab after configuring restic and testing restore.
+# Replace the checkout path. This is not installed automatically.
+0 3 * * * cd /opt/secondbrain && docker compose -f infrastructure/compose.production.yaml run --rm operations pnpm ops backup >> /var/log/secondbrain-backup.log 2>&1

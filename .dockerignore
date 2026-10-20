@@ -1,0 +1,16 @@
+node_modules
+**/node_modules
+**/.next
+.git
+.env
+.env.*
+!.env.example
+data
+erasures
+secrets
+playwright-report
+test-results
+coverage
+
+backups
+.taste-skill

@@ -1,0 +1,110 @@
+name: secondbrain
+x-application: &application
+  image: secondbrain:local
+  build:
+    context: ..
+    dockerfile: infrastructure/Dockerfile
+  env_file: ../.env
+  environment: &app-env
+    NODE_ENV: production
+    HOST: 0.0.0.0
+    DATABASE_URL: postgres://secondbrain:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/secondbrain
+    REDIS_URL: redis://redis:6379
+    DATA_DIR: /data
+    ERASURE_MANIFEST_PATH: /erasures/manifest.jsonl
+    RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-/backups/restic}
+    RESTIC_PASSWORD_FILE: /data/secrets/restic-password
+  volumes:
+    - application_data:/data
+    - ${ERASURE_DIRECTORY:-../erasures}:/erasures
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777,size=512m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+  mem_limit: 1g
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+services:
+  postgres:
+    image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+    environment:
+      POSTGRES_DB: secondbrain
+      POSTGRES_USER: secondbrain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U secondbrain -d secondbrain']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: 1g
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+  redis:
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    command: [redis-server, --appendonly, 'yes', --maxmemory-policy, noeviction]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: 256m
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+  migrate:
+    <<: *application
+    command: [pnpm, db:migrate]
+    restart: 'no'
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    <<: *application
+    command: [pnpm, start:api]
+    healthcheck:
+      test: [CMD, node, -e, 'fetch("http://127.0.0.1:3001/health/ready").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  worker:
+    <<: *application
+    command: [pnpm, start:worker]
+    stop_grace_period: 35s
+    depends_on:
+      api: {condition: service_healthy}
+  web:
+    <<: *application
+    command: [pnpm, --dir, apps/web, start]
+    environment:
+      <<: *app-env
+      PORT: '3000'
+      API_ORIGIN: http://api:3001
+    ports: [127.0.0.1:3000:3000]
+    mem_limit: 512m
+    tmpfs:
+      - /tmp:mode=1777,size=256m
+      - /app/apps/web/.next/cache:uid=1000,gid=1000,mode=0700,size=64m
+    depends_on:
+      api: {condition: service_healthy}
+  operations:
+    <<: *application
+    profiles: [operations]
+    command: [pnpm, ops, backup]
+    restart: 'no'
+    volumes:
+      - application_data:/data
+      - ${ERASURE_DIRECTORY:-../erasures}:/erasures
+      - ${BACKUP_DIRECTORY:-../backups}:/backups
+    tmpfs:
+      - /tmp:mode=1777,size=2g
+    mem_limit: 512m
+volumes:
+  postgres_data:
+  redis_data:
+  application_data:
